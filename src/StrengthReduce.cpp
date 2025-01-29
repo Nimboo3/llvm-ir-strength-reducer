@@ -1,12 +1,20 @@
 #include "StrengthReduce.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cmath>
 
 using namespace llvm;
+
+STATISTIC(NumMulPow2,    "Multiplications by power-of-two converted to shift");
+STATISTIC(NumDivPow2,    "Unsigned divisions by power-of-two converted to shift");
+STATISTIC(NumMulAddChain,"Multiplications converted to shift-add chain");
 
 namespace {
 // Build a shift-add chain for x * C where C has few set bits
@@ -53,6 +61,7 @@ PreservedAnalyses StrengthReducePass::run(Function &F, FunctionAnalysisManager &
                                 B.CreateShl(Op0, ConstantInt::get(Const->getType(), ShiftAmt),
                                             "mul_pow2");
                             BO->replaceAllUsesWith(Shifted);
+                            ++NumMulPow2;
                             Modified = true;
                         }
                         // Low popcount: use shift-add chain
@@ -60,6 +69,7 @@ PreservedAnalyses StrengthReducePass::run(Function &F, FunctionAnalysisManager &
                             Value *Chain = buildShiftAddChain(B, Op0, C);
                             Chain->setName("mul_addchain");
                             BO->replaceAllUsesWith(Chain);
+                            ++NumMulAddChain;
                             Modified = true;
                         }
                     }
@@ -77,6 +87,7 @@ PreservedAnalyses StrengthReducePass::run(Function &F, FunctionAnalysisManager &
                                 B.CreateLShr(Op0, ConstantInt::get(Const->getType(), ShiftAmt),
                                              "udiv_pow2");
                             BO->replaceAllUsesWith(Shifted);
+                            ++NumDivPow2;
                             Modified = true;
                         }
                     }
@@ -86,4 +97,20 @@ PreservedAnalyses StrengthReducePass::run(Function &F, FunctionAnalysisManager &
     }
 
     return Modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+// Pass plugin registration
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
+    return {LLVM_PLUGIN_API_VERSION, "StrengthReducePass", LLVM_VERSION_STRING,
+            [](PassBuilder &PB) {
+                PB.registerPipelineParsingCallback(
+                    [](StringRef Name, FunctionPassManager &FPM,
+                       ArrayRef<PassBuilder::PipelineElement>) {
+                        if (Name == "strength-reduce") {
+                            FPM.addPass(StrengthReducePass());
+                            return true;
+                        }
+                        return false;
+                    });
+            }};
 }
